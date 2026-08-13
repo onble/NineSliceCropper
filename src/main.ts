@@ -1,6 +1,7 @@
 import './style.css';
 import { clampInteger, displayToSourcePixel } from './editor/coordinate.js';
 import { calculateNineSliceRegions, composeNineSlice, validateSliceBounds } from './image/cropNineSlice.js';
+import { createWorkerPngOptimizer, optimizePng } from './image/optimizePng.js';
 import type { ImageSize, SliceBounds } from './types.js';
 
 type BoundKey = keyof SliceBounds;
@@ -87,7 +88,8 @@ app.innerHTML = `
         <section class="panel result-panel">
           <p class="section-label">输出结果</p>
           <div id="output-size" class="output-size">— <span>px</span></div>
-          <p>仅保留四角，并按原始分辨率无缩放拼接。</p>
+          <p>仅保留四角，按原始分辨率拼接；导出时自动进行无损 PNG 优化。</p>
+          <p id="export-detail" class="export-detail" aria-live="polite"></p>
         </section>
 
         <section class="panel cocos-panel">
@@ -147,6 +149,7 @@ const previewWrap = byId<HTMLDivElement>('preview-wrap');
 const previewSize = byId<HTMLSpanElement>('preview-size');
 const outputSize = byId<HTMLDivElement>('output-size');
 const boundsError = byId<HTMLParagraphElement>('bounds-error');
+const exportDetail = byId<HTMLParagraphElement>('export-detail');
 const inputs = Object.fromEntries(
   [...document.querySelectorAll<HTMLInputElement>('input[data-key]')].map((input) => [input.dataset.key, input]),
 ) as Record<BoundKey, HTMLInputElement>;
@@ -161,6 +164,13 @@ let drag: DragState | null = null;
 let inputIsValid = true;
 let exporting = false;
 let loadRequestId = 0;
+let exportRequestId = 0;
+let exportAbortController: AbortController | null = null;
+
+const workerOptimizer = createWorkerPngOptimizer(() => new Worker(
+  new URL('./image/optimizePng.worker.ts', import.meta.url),
+  { type: 'module' },
+));
 
 function setStatus(message: string, kind: 'normal' | 'error' | 'success' = 'normal'): void {
   status.textContent = message;
@@ -312,6 +322,10 @@ async function decodePng(file: File): Promise<LoadedImage> {
 }
 
 async function loadFile(file: File): Promise<void> {
+  exportRequestId += 1;
+  exportAbortController?.abort();
+  exportAbortController = null;
+  exporting = false;
   const requestId = ++loadRequestId;
   let next: LoadedImage | null = null;
   setStatus(`正在加载 ${file.name}…`);
@@ -342,6 +356,7 @@ async function loadFile(file: File): Promise<void> {
     loaded = next;
     sourceTitle.textContent = next.fileName;
     sourceSize.textContent = `${next.size.width} × ${next.size.height} px`;
+    exportDetail.textContent = '';
     emptyState.hidden = true;
     editorStage.hidden = false;
     editorStage.style.setProperty('--image-ratio', String(next.size.width / next.size.height));
@@ -371,6 +386,7 @@ async function loadFile(file: File): Promise<void> {
     if (next && loaded?.objectUrl !== next.objectUrl) URL.revokeObjectURL(next.objectUrl);
     if (requestId === loadRequestId) {
       setStatus(error instanceof Error ? error.message : '无法加载图片。', 'error');
+      setControlsEnabled(Boolean(loaded && bounds));
     }
   } finally {
     if (requestId === loadRequestId) fileInput.value = '';
@@ -501,32 +517,91 @@ copyButton.addEventListener('click', async () => {
   }
 });
 
-exportButton.addEventListener('click', () => {
+function canvasToPng(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('浏览器无法生成 PNG，请重试。'));
+    }, 'image/png');
+  });
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function downloadPng(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+exportButton.addEventListener('click', async () => {
   if (!loaded || !bounds || !inputIsValid || exporting) return;
-  const exportCanvas = composeNineSlice(loaded.element, loaded.size, { ...bounds });
-  const exportName = `${loaded.fileName.replace(/\.png$/i, '') || '图片'}-九宫格裁剪.png`;
+
+  const taskId = ++exportRequestId;
+  const controller = new AbortController();
+  exportAbortController?.abort();
+  exportAbortController = controller;
+  const snapshot = {
+    element: loaded.element,
+    size: { ...loaded.size },
+    bounds: { ...bounds },
+    fileName: `${loaded.fileName.replace(/\.png$/i, '') || '图片'}-九宫格裁剪.png`,
+  };
+
   exporting = true;
+  exportDetail.textContent = '';
   setControlsEnabled(true);
   setStatus('正在生成 PNG…');
-  exportCanvas.toBlob((blob) => {
-    exporting = false;
-    setControlsEnabled(true);
-    if (!blob) {
-      setStatus('浏览器无法生成 PNG，请重试。', 'error');
-      return;
+
+  try {
+    const exportCanvas = composeNineSlice(snapshot.element, snapshot.size, snapshot.bounds);
+    const baseline = await canvasToPng(exportCanvas);
+    if (taskId !== exportRequestId) return;
+
+    setStatus('正在进行无损 PNG 优化…');
+    const result = await optimizePng(baseline, {
+      optimizer: workerOptimizer,
+      timeoutMs: 30_000,
+      signal: controller.signal,
+    });
+    if (taskId !== exportRequestId) return;
+
+    downloadPng(result.blob, snapshot.fileName);
+    if (result.usedOptimized) {
+      const saved = result.originalBytes - result.optimizedBytes;
+      const percent = Math.round((saved / result.originalBytes) * 100);
+      exportDetail.textContent = `优化前 ${formatBytes(result.originalBytes)} → 导出 ${formatBytes(result.optimizedBytes)}，减少 ${percent}%`;
+      setStatus(`已无损优化并导出 ${snapshot.fileName}。`, 'success');
+    } else if (result.status === 'kept-original') {
+      exportDetail.textContent = `导出 ${formatBytes(result.optimizedBytes)}；优化结果未更小，已保留基础 PNG`;
+      setStatus(`已导出 ${snapshot.fileName}，当前 PNG 已无需进一步优化。`, 'success');
+    } else {
+      exportDetail.textContent = `导出 ${formatBytes(result.optimizedBytes)}；${result.reason ?? '优化不可用，已安全回退'}`;
+      setStatus(`优化未完成，已导出未优化的无损 PNG。`, 'success');
     }
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = exportName;
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    setStatus(`已导出 ${anchor.download}。`, 'success');
-  }, 'image/png');
+  } catch (error) {
+    if (taskId === exportRequestId) {
+      setStatus(error instanceof Error ? error.message : 'PNG 导出失败，请重试。', 'error');
+    }
+  } finally {
+    if (taskId === exportRequestId) {
+      exporting = false;
+      exportAbortController = null;
+      setControlsEnabled(true);
+    }
+  }
 });
 
 window.addEventListener('beforeunload', () => {
+  exportAbortController?.abort();
   if (loaded) URL.revokeObjectURL(loaded.objectUrl);
 });

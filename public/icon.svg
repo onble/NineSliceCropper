@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">NineSliceCropper</title>
+  <desc id="desc">Four preserved image corners surrounding a cropped center.</desc>
+
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#12151d" stroke="#2a3040" stroke-width="2"/>
+
+  <path d="M12 26V16a4 4 0 0 1 4-4h10v6h-6a2 2 0 0 0-2 2v6z" fill="#61e4b7"/>
+  <path d="M38 12h10a4 4 0 0 1 4 4v10h-6v-6a2 2 0 0 0-2-2h-6z" fill="#61e4b7"/>
+  <path d="M12 38h6v6a2 2 0 0 0 2 2h6v6H16a4 4 0 0 1-4-4z" fill="#61e4b7"/>
+  <path d="M46 38h6v10a4 4 0 0 1-4 4H38v-6h6a2 2 0 0 0 2-2z" fill="#61e4b7"/>
+
+  <path d="M32 9v11M32 44v11M9 32h11M44 32h11" fill="none" stroke="#ff8a5b" stroke-width="3" stroke-linecap="round"/>
+  <rect x="27" y="27" width="10" height="10" rx="3" fill="#0b0d12" stroke="#ff8a5b" stroke-width="2"/>
+</svg>

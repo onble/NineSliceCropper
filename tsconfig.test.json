@@ -12,6 +12,7 @@
   "include": [
     "src/types.ts",
     "src/image/cropNineSlice.ts",
+    "src/image/optimizePng.ts",
     "src/editor/coordinate.ts",
     "tests/**/*.ts"
   ]

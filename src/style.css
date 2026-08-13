@@ -76,7 +76,8 @@ h2 { margin-bottom: 0; font-size: 1rem; letter-spacing: -.015em; }
 .field-error { min-height: 17px; margin: 11px 0 0; color: var(--danger); font-size: .7rem; line-height: 1.35; }
 .output-size { margin: 1px 0 4px; color: #fff; font: 500 2rem ui-monospace, Consolas, monospace; letter-spacing: -.07em; }
 .output-size span { color: var(--muted); font-size: .78rem; letter-spacing: 0; }
-.result-panel > p:last-child { margin: 0; color: var(--muted); font-size: .72rem; line-height: 1.5; }
+.result-panel > p:not(.section-label) { margin-bottom: 0; color: var(--muted); font-size: .72rem; line-height: 1.5; }
+.result-panel .export-detail { min-height: 0; margin-top: 9px; color: var(--mint); font-size: .68rem; }
 .text-button { padding: 3px 0; border: 0; color: var(--mint); background: none; cursor: pointer; font-size: .71rem; font-weight: 800; }
 .text-button:disabled { color: #596173; cursor: not-allowed; }
 .inset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; }
