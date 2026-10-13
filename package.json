@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "tsc -p tsconfig.test.json && node .test-dist/tests/cropNineSlice.test.js && node .test-dist/tests/optimizePng.test.js"
+    "test": "tsc -p tsconfig.test.json && node .test-dist/tests/cropNineSlice.test.js && node .test-dist/tests/optimizePng.test.js && node .test-dist/tests/mirrorImage.test.js"
   },
   "devDependencies": {
     "typescript": "^5.9.2",

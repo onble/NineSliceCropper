@@ -1,4 +1,5 @@
-import { optimise } from '@jsquash/oxipng';
+import initOxiPng, { optimise } from '@jsquash/oxipng/codec/pkg/squoosh_oxipng.js';
+import oxiPngWasmUrl from '@jsquash/oxipng/codec/pkg/squoosh_oxipng_bg.wasm?url';
 import type {
   PngBytes,
   PngOptimizer,
@@ -20,12 +21,7 @@ function outputBuffer(value: PngBytes): ArrayBuffer {
   return Uint8Array.from(bytes).buffer;
 }
 
-/**
- * Installs the shared worker protocol around a concrete WASM encoder.
- *
- * The worker entry point should import its encoder and call this once:
- * `installPngOptimizerWorker((bytes) => encoder.optimize(bytes))`.
- */
+/** Installs the shared worker protocol around a concrete WASM encoder. */
 export function installPngOptimizerWorker(
   optimizer: PngOptimizer,
   scope: WorkerScope = self as unknown as WorkerScope,
@@ -46,8 +42,47 @@ export function installPngOptimizerWorker(
   });
 }
 
-installPngOptimizerWorker(async (bytes) => optimise(Uint8Array.from(bytes).buffer, {
-  level: 3,
-  interlace: false,
-  optimiseAlpha: false,
-}));
+let oxiPngReady: Promise<void> | undefined;
+
+function hasWasmMagic(bytes: Uint8Array): boolean {
+  return bytes.length >= 4
+    && bytes[0] === 0x00
+    && bytes[1] === 0x61
+    && bytes[2] === 0x73
+    && bytes[3] === 0x6d;
+}
+
+/**
+ * Initialise the single-threaded codec from an asset URL emitted by Vite.
+ * Loading the bytes explicitly avoids the package's automatic multi-thread
+ * feature detection and its deployment-sensitive internal URL resolution.
+ */
+function ensureOxiPng(): Promise<void> {
+  if (!oxiPngReady) {
+    oxiPngReady = (async () => {
+      const response = await fetch(oxiPngWasmUrl);
+      if (!response.ok) {
+        throw new Error(`无损优化组件请求失败（HTTP ${response.status}），请确认部署包含 assets 目录中的 WASM 文件。`);
+      }
+
+      const wasmBytes = new Uint8Array(await response.arrayBuffer());
+      if (!hasWasmMagic(wasmBytes)) {
+        const contentType = response.headers.get('content-type') ?? '未知类型';
+        throw new Error(`无损优化组件内容无效（${contentType}），服务器没有返回正确的 WASM 文件。`);
+      }
+
+      await initOxiPng(wasmBytes);
+    })().catch((error: unknown) => {
+      // Retry on the next export after a transient deployment/network error.
+      oxiPngReady = undefined;
+      throw error;
+    });
+  }
+
+  return oxiPngReady;
+}
+
+installPngOptimizerWorker(async (bytes) => {
+  await ensureOxiPng();
+  return optimise(Uint8Array.from(bytes), 3, false, false);
+});

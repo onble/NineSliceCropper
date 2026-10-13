@@ -80,7 +80,8 @@ export function composeNineSlice(
   target.width = result.outputSize.width;
   target.height = result.outputSize.height;
 
-  const context = target.getContext('2d');
+  // Keep translucent pixel rounding consistent across previews, resets and exports.
+  const context = target.getContext('2d', { willReadFrequently: true });
   if (!context) {
     throw new Error('当前浏览器无法创建 2D 画布。');
   }
