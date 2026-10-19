@@ -1,6 +1,7 @@
 import {
   calculateNineSliceRegions,
   composeNineSlice,
+  scaleSliceBounds,
   validateSliceBounds,
 } from '../src/image/cropNineSlice.js';
 import { clampInteger, displayToSourcePixel } from '../src/editor/coordinate.js';
@@ -69,6 +70,44 @@ equal(minimum.outputSize, { width: 2, height: 2 }, '2 × 2 minimum is valid');
 equal(displayToSourcePixel(110, 10, 960, 1920), 200, 'Display maps to source pixels');
 equal(displayToSourcePixel(176.5, 10, 333, 1000), 500, 'Coordinate mapping rounds once');
 equal(clampInteger(10.7, 1, 10), 10, 'Clamp rounds and applies maximum');
+
+const previousBounds = { left: 30, right: 60, top: 40, bottom: 160 };
+equal(
+  scaleSliceBounds({ width: 100, height: 200 }, { width: 100, height: 200 }, previousBounds),
+  previousBounds,
+  'Same-size replacement preserves all coordinates',
+);
+equal(
+  scaleSliceBounds({ width: 100, height: 200 }, { width: 200, height: 100 }, previousBounds),
+  { left: 60, right: 120, top: 20, bottom: 80 },
+  'Width and height scale independently, including right/bottom coordinates',
+);
+equal(
+  scaleSliceBounds({ width: 100, height: 200 }, { width: 100, height: 100 }, previousBounds),
+  { left: 30, right: 60, top: 20, bottom: 80 },
+  'Changing only height preserves horizontal coordinates',
+);
+equal(
+  scaleSliceBounds({ width: 100, height: 200 }, { width: 7, height: 9 }, previousBounds),
+  { left: 2, right: 4, top: 2, bottom: 7 },
+  'Fractional coordinates round to nearest pixel',
+);
+equal(
+  scaleSliceBounds({ width: 100, height: 100 }, { width: 2, height: 2 },
+    { left: 1, right: 99, top: 1, bottom: 99 }),
+  { left: 1, right: 1, top: 1, bottom: 1 },
+  'Downscaling keeps all four corners nonempty at minimum size',
+);
+equal(
+  scaleSliceBounds({ width: 100, height: 100 }, { width: 51, height: 51 },
+    { left: 30, right: 30, top: 60, bottom: 60 }),
+  { left: 15, right: 15, top: 31, bottom: 31 },
+  'Coincident guides remain coincident',
+);
+rejects(
+  () => scaleSliceBounds({ width: 100, height: 200 }, { width: 1, height: 2 }, previousBounds),
+  'Replacement must support four nonempty corners',
+);
 
 const drawCalls: unknown[][] = [];
 const mockContext = {

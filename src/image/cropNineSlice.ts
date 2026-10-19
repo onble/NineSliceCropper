@@ -34,6 +34,25 @@ export function validateSliceBounds(
   }
 }
 
+/** Keep each guide at the same relative position when replacing an image. */
+export function scaleSliceBounds(
+  previousSize: Readonly<ImageSize>,
+  nextSize: Readonly<ImageSize>,
+  bounds: Readonly<SliceBounds>,
+): SliceBounds {
+  validateSliceBounds(previousSize, bounds);
+  const scale = (value: number, previousLength: number, nextLength: number): number =>
+    Math.max(1, Math.min(nextLength - 1, Math.round(value * nextLength / previousLength)));
+  const result = {
+    left: scale(bounds.left, previousSize.width, nextSize.width),
+    right: scale(bounds.right, previousSize.width, nextSize.width),
+    top: scale(bounds.top, previousSize.height, nextSize.height),
+    bottom: scale(bounds.bottom, previousSize.height, nextSize.height),
+  };
+  validateSliceBounds(nextSize, result);
+  return result;
+}
+
 function rect(x: number, y: number, width: number, height: number): PixelRect {
   return { x, y, width, height };
 }

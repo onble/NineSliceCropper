@@ -1,15 +1,20 @@
 import { clampInteger } from './coordinate.js';
 
-interface PreviewViewportOptions {
+interface ImageViewportOptions {
   viewport: HTMLDivElement;
-  canvas: HTMLCanvasElement;
+  content: HTMLElement;
   slider: HTMLInputElement;
   value: HTMLOutputElement;
   resetButton: HTMLButtonElement;
+  centeredInFlow?: boolean;
+  middleButtonPan?: boolean;
+  canInteract?: () => boolean;
+  onReset?: () => void;
 }
 
 interface PanState {
   pointerId: number;
+  buttonMask: number;
   clientX: number;
   clientY: number;
 }
@@ -17,14 +22,18 @@ interface PanState {
 const MIN_ZOOM = 10;
 const MAX_ZOOM = 3200;
 
-/** Changes only the canvas display; exported image pixels remain untouched. */
-export function createPreviewViewport({
+/** Changes only the display; exported image pixels remain untouched. */
+export function createImageViewport({
   viewport,
-  canvas,
+  content,
   slider,
   value,
   resetButton,
-}: PreviewViewportOptions): { setEnabled(enabled: boolean): void; reset(): void } {
+  centeredInFlow = false,
+  middleButtonPan = false,
+  canInteract = () => true,
+  onReset,
+}: ImageViewportOptions): { setEnabled(enabled: boolean): void; reset(): void } {
   let enabled = false;
   let percent = 100;
   let offsetX = 0;
@@ -36,7 +45,9 @@ export function createPreviewViewport({
   slider.step = '1';
 
   function render(): void {
-    canvas.style.transform = `translate(-50%, -50%) translate(${offsetX}px, ${offsetY}px) scale(${percent / 100})`;
+    const origin = centeredInFlow ? '' : 'translate(-50%, -50%) ';
+    content.style.transform = `${origin}translate(${offsetX}px, ${offsetY}px) scale(${percent / 100})`;
+    content.style.setProperty('--view-scale', String(percent / 100));
     slider.value = String(percent);
     slider.setAttribute('aria-valuetext', `${percent}%`);
     value.value = `${percent}%`;
@@ -64,6 +75,7 @@ export function createPreviewViewport({
 
   function reset(): void {
     stopPan();
+    onReset?.();
     percent = 100;
     offsetX = 0;
     offsetY = 0;
@@ -75,13 +87,14 @@ export function createPreviewViewport({
     slider.disabled = !enabled;
     resetButton.disabled = !enabled;
     viewport.setAttribute('aria-disabled', String(!enabled));
+    viewport.classList.toggle('is-interactive', enabled);
     if (!enabled) stopPan();
   }
 
   viewport.addEventListener('wheel', (event) => {
     if (!enabled) return;
     event.preventDefault();
-    if (event.deltaY === 0) return;
+    if (!canInteract() || event.deltaY === 0) return;
     stopPan();
 
     const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
@@ -96,24 +109,36 @@ export function createPreviewViewport({
   }, { passive: false });
 
   slider.addEventListener('input', () => {
-    if (!enabled) return;
+    if (!enabled || !canInteract()) {
+      render();
+      return;
+    }
     stopPan();
     zoomTo(slider.valueAsNumber);
   });
 
   resetButton.addEventListener('click', reset);
 
+  // Prevent browser middle-click autoscroll within the editing viewport.
+  viewport.addEventListener('mousedown', (event) => {
+    if (middleButtonPan && event.button === 1) event.preventDefault();
+  });
+  viewport.addEventListener('auxclick', (event) => {
+    if (middleButtonPan && event.button === 1) event.preventDefault();
+  });
+
   viewport.addEventListener('pointerdown', (event) => {
-    if (!enabled || !event.isPrimary || event.button !== 0 || pan) return;
+    const supportedButton = event.button === 0 || (middleButtonPan && event.button === 1);
+    if (!enabled || !canInteract() || event.defaultPrevented || !event.isPrimary || !supportedButton || pan) return;
     event.preventDefault();
-    pan = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
+    pan = { pointerId: event.pointerId, buttonMask: event.button === 1 ? 4 : 1, clientX: event.clientX, clientY: event.clientY };
     viewport.setPointerCapture(event.pointerId);
     viewport.classList.add('is-panning');
   });
 
   viewport.addEventListener('pointermove', (event) => {
     if (!pan || event.pointerId !== pan.pointerId) return;
-    if (event.pointerType === 'mouse' && (event.buttons & 1) === 0) {
+    if (event.pointerType === 'mouse' && (event.buttons & pan.buttonMask) === 0) {
       stopPan();
       return;
     }

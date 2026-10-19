@@ -1,7 +1,8 @@
 import './style.css';
 import { clampInteger, displayToSourcePixel } from './editor/coordinate.js';
-import { createPreviewViewport } from './editor/previewViewport.js';
-import { calculateNineSliceRegions, composeNineSlice, validateSliceBounds } from './image/cropNineSlice.js';
+import { createImageViewport } from './editor/imageViewport.js';
+import { setupEditorResize } from './editor/editorResize.js';
+import { calculateNineSliceRegions, composeNineSlice, scaleSliceBounds, validateSliceBounds } from './image/cropNineSlice.js';
 import { createWorkerPngOptimizer, optimizePng } from './image/optimizePng.js';
 import { composeHorizontalMirror, symmetricSliceBounds, type MirrorMode } from './image/mirrorImage.js';
 import { buildExportFileName, validateFileNameSuffix } from './image/exportFileName.js';
@@ -28,11 +29,6 @@ if (!app) throw new Error('找不到应用根节点。');
 app.innerHTML = `
   <main class="app-shell">
     <header class="app-header">
-      <div>
-        <p class="eyebrow">浏览器本地像素工具</p>
-        <h1>NineSlice<span>Cropper</span></h1>
-        <p class="subtitle">删除可拉伸的中间区域，完整保留四角像素。</p>
-      </div>
       <div class="actions" aria-label="文件操作">
         <label class="button button-primary" for="file-input" role="button" tabindex="0">上传 PNG</label>
         <input id="file-input" type="file" accept="image/png,.png" hidden />
@@ -44,6 +40,7 @@ app.innerHTML = `
     <p id="status" class="status" role="status" aria-live="polite"></p>
 
     <section class="workspace">
+      <div class="canvas-column">
       <article id="editor-card" class="panel editor-card">
         <div class="panel-heading">
           <div>
@@ -53,7 +50,7 @@ app.innerHTML = `
           <span id="source-size" class="size-badge">—</span>
         </div>
 
-        <div id="drop-zone" class="drop-zone">
+        <div id="drop-zone" class="drop-zone" aria-label="可缩放和拖动的源图片操作区" aria-describedby="editor-hint">
           <div id="empty-state" class="empty-state">
             <div class="upload-mark" aria-hidden="true">↥</div>
             <strong>将 PNG 拖到这里</strong>
@@ -67,8 +64,37 @@ app.innerHTML = `
             <div class="guide horizontal" data-key="bottom" role="slider" aria-label="下侧切片线" tabindex="0"></div>
           </div>
         </div>
-        <p class="editor-hint">拖动切片线进行调整；聚焦后也可使用方向键，或在右侧输入精确的源图像素。</p>
+        <div class="preview-controls" aria-label="源图视图控制">
+          <label for="editor-zoom">缩放</label>
+          <input id="editor-zoom" type="range" min="10" max="3200" step="1" value="100" disabled />
+          <output id="editor-zoom-value" for="editor-zoom">100%</output>
+          <button id="editor-reset" class="button preview-reset" type="button" disabled>居中复原</button>
+        </div>
+        <p id="editor-hint" class="editor-hint">滚轮放大 / 缩小 · 按住左键或中键拖动图片或空白处平移 · 左键拖动切片线调整边界（也可用方向键或右侧坐标输入）· 100% 为适应窗口的初始比例</p>
+        <div id="editor-resize" class="editor-resize" role="separator" tabindex="0" aria-label="调整源图片窗口高度" aria-orientation="horizontal" aria-controls="editor-card" title="上下拖动调整高度；方向键微调，双击恢复默认高度"><span aria-hidden="true">↕ 调整高度</span></div>
       </article>
+
+      <section class="panel preview-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="section-label">实时输出</p>
+            <h2>四角拼接预览</h2>
+          </div>
+          <span id="preview-size" class="size-badge">—</span>
+        </div>
+        <div id="preview-empty" class="preview-empty">裁剪结果将在这里实时显示。</div>
+        <div id="preview-wrap" class="preview-wrap" aria-label="可缩放和拖动的输出预览" aria-describedby="preview-hint" hidden>
+          <canvas id="output-canvas" aria-label="九宫格裁剪输出预览"></canvas>
+        </div>
+        <div class="preview-controls" aria-label="预览视图控制">
+          <label for="preview-zoom">缩放</label>
+          <input id="preview-zoom" type="range" min="10" max="3200" step="1" value="100" disabled />
+          <output id="preview-zoom-value" for="preview-zoom">100%</output>
+          <button id="preview-reset" class="button preview-reset" type="button" disabled>1:1 居中复位</button>
+        </div>
+        <p id="preview-hint" class="preview-hint">滚轮放大 / 缩小 · 按住鼠标左键或中键拖动 · 仅调整预览显示比例</p>
+      </section>
+      </div>
 
       <aside class="side-column">
         <section class="panel settings-panel">
@@ -87,13 +113,33 @@ app.innerHTML = `
           </div>
           <p id="bounds-error" class="field-error" aria-live="polite"></p>
           <div class="mirror-settings">
-            <label for="mirror-mode">左右对称修复</label>
-            <select id="mirror-mode" aria-describedby="mirror-hint" disabled>
-              <option value="none">保持原图</option>
-              <option value="left">以左侧为准 → 镜像到右侧</option>
-              <option value="right">以右侧为准 → 镜像到左侧</option>
-            </select>
+            <div class="mirror-heading">
+              <span id="mirror-label">左右对称修复</span>
+              <button id="mirror-details-button" class="text-button" type="button" aria-expanded="false" aria-controls="mirror-details">详细信息</button>
+            </div>
+            <div class="mirror-options" role="radiogroup" aria-labelledby="mirror-label" aria-describedby="mirror-hint">
+              <label class="mirror-option">
+                <input type="radio" name="mirror-mode" value="none" checked />
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m5 17 5-6 4 4 3-3 4 5"/><circle cx="16" cy="8" r="1"/></svg>保持原图</span>
+              </label>
+              <label class="mirror-option">
+                <input type="radio" name="mirror-mode" value="left" />
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 2v20" stroke-dasharray="2 2"/><path d="M9 5H3v14h6Z" fill="currentColor" fill-opacity=".25"/><path d="M15 5h6v14h-6" stroke-dasharray="2 2"/><path d="M8 12h9m-3-3 3 3-3 3"/></svg>以左为准</span>
+              </label>
+              <label class="mirror-option">
+                <input type="radio" name="mirror-mode" value="right" />
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 2v20" stroke-dasharray="2 2"/><path d="M15 5h6v14h-6Z" fill="currentColor" fill-opacity=".25"/><path d="M9 5H3v14h6" stroke-dasharray="2 2"/><path d="M16 12H7m3-3-3 3 3 3"/></svg>以右为准</span>
+              </label>
+            </div>
             <p id="mirror-hint" class="mirror-hint">选择保留的一侧，将它镜像到另一侧，修复左右不对称。</p>
+            <div id="mirror-details" class="mirror-details" hidden>
+              <p><strong>保持原图：</strong>使用原图像素，不进行镜像。</p>
+              <p><strong>以左为准：</strong>保留左半边，沿图片竖直中线水平翻转并覆盖右半边。</p>
+              <p><strong>以右为准：</strong>保留右半边，沿图片竖直中线水平翻转并覆盖左半边。</p>
+              <p><strong>镜像标准：</strong>对称位置的像素逐一复制，包含颜色和透明度；图片尺寸不变。宽度为奇数时，最中间一列保持原样。</p>
+              <p><strong>切片边界：</strong>开启镜像时，以所选一侧的保留宽度同步另一侧（最多为原图宽度的一半，向下取整），之后左右切片线联动，上下边界不变。先镜像，再裁剪，预览与导出同步生效。</p>
+              <p>切回“保持原图”会恢复原图像素，但保留当前切片边界；顶部“重置”可同时恢复初始边界和原图。</p>
+            </div>
           </div>
         </section>
 
@@ -135,26 +181,11 @@ app.innerHTML = `
       </aside>
     </section>
 
-    <section class="panel preview-panel">
-      <div class="panel-heading">
-        <div>
-          <p class="section-label">实时输出</p>
-          <h2>四角拼接预览</h2>
-        </div>
-        <span id="preview-size" class="size-badge">—</span>
-      </div>
-      <div id="preview-empty" class="preview-empty">裁剪结果将在这里实时显示。</div>
-      <div id="preview-wrap" class="preview-wrap" aria-label="可缩放和拖动的输出预览" aria-describedby="preview-hint" hidden>
-        <canvas id="output-canvas" aria-label="九宫格裁剪输出预览"></canvas>
-      </div>
-      <div class="preview-controls" aria-label="预览视图控制">
-        <label for="preview-zoom">缩放</label>
-        <input id="preview-zoom" type="range" min="10" max="3200" step="1" value="100" disabled />
-        <output id="preview-zoom-value" for="preview-zoom">100%</output>
-        <button id="preview-reset" class="button preview-reset" type="button" disabled>1:1 居中复位</button>
-      </div>
-      <p id="preview-hint" class="preview-hint">滚轮放大 / 缩小 · 按住鼠标左键拖动 · 仅调整预览显示比例</p>
-    </section>
+    <footer class="app-footer">
+      <p class="eyebrow">浏览器本地像素工具</p>
+      <h1>NineSlice<span>Cropper</span></h1>
+      <p class="subtitle">删除可拉伸的中间区域，完整保留四角像素。</p>
+    </footer>
   </main>
 `;
 
@@ -172,6 +203,7 @@ const status = byId<HTMLParagraphElement>('status');
 const sourceTitle = byId<HTMLHeadingElement>('source-title');
 const sourceSize = byId<HTMLSpanElement>('source-size');
 const dropZone = byId<HTMLDivElement>('drop-zone');
+setupEditorResize(byId('editor-card'), byId('editor-resize'));
 const emptyState = byId<HTMLDivElement>('empty-state');
 const editorStage = byId<HTMLDivElement>('editor-stage');
 const editorCanvas = byId<HTMLCanvasElement>('editor-canvas');
@@ -182,15 +214,29 @@ const previewSize = byId<HTMLSpanElement>('preview-size');
 const outputSize = byId<HTMLDivElement>('output-size');
 const boundsError = byId<HTMLParagraphElement>('bounds-error');
 const exportDetail = byId<HTMLParagraphElement>('export-detail');
-const mirrorSelect = byId<HTMLSelectElement>('mirror-mode');
+const mirrorOptions = [...document.querySelectorAll<HTMLInputElement>('input[name="mirror-mode"]')];
+const mirrorDetailsButton = byId<HTMLButtonElement>('mirror-details-button');
+const mirrorDetails = byId<HTMLDivElement>('mirror-details');
 const mirrorHint = byId<HTMLParagraphElement>('mirror-hint');
 const suffixEnabled = byId<HTMLInputElement>('suffix-enabled');
 const suffixField = byId<HTMLDivElement>('suffix-field');
 const suffixInput = byId<HTMLInputElement>('filename-suffix');
 const suffixError = byId<HTMLParagraphElement>('suffix-error');
-const previewViewport = createPreviewViewport({
+const editorViewport = createImageViewport({
+  viewport: dropZone,
+  content: editorStage,
+  slider: byId<HTMLInputElement>('editor-zoom'),
+  value: byId<HTMLOutputElement>('editor-zoom-value'),
+  resetButton: byId<HTMLButtonElement>('editor-reset'),
+  centeredInFlow: true,
+  middleButtonPan: true,
+  canInteract: () => !drag,
+  onReset: stopGuideDrag,
+});
+const previewViewport = createImageViewport({
+  middleButtonPan: true,
   viewport: previewWrap,
-  canvas: outputCanvas,
+  content: outputCanvas,
   slider: byId<HTMLInputElement>('preview-zoom'),
   value: byId<HTMLOutputElement>('preview-zoom-value'),
   resetButton: byId<HTMLButtonElement>('preview-reset'),
@@ -234,9 +280,9 @@ function defaultBounds(size: ImageSize): SliceBounds {
 }
 
 function setControlsEnabled(enabled: boolean): void {
+  editorViewport.setEnabled(Boolean(loaded));
   previewViewport.setEnabled(enabled);
   for (const input of Object.values(inputs)) input.disabled = !enabled;
-  mirrorSelect.disabled = !enabled;
   for (const guide of Object.values(guides)) {
     guide.tabIndex = enabled ? 0 : -1;
     guide.classList.toggle('disabled', !enabled);
@@ -255,6 +301,34 @@ function validateSuffix(): boolean {
   else suffixInput.removeAttribute('aria-invalid');
   setControlsEnabled(Boolean(loaded && bounds));
   return suffixIsValid;
+}
+
+const suffixStorageKey = 'nine-slice-cropper.export-suffix.v1';
+
+function saveSuffixPreferences(): void {
+  try {
+    localStorage.setItem(suffixStorageKey, JSON.stringify({
+      enabled: suffixEnabled.checked,
+      value: suffixInput.value,
+    }));
+  } catch {
+    // Keep editing usable when browser storage is unavailable or full.
+  }
+}
+
+function restoreSuffixPreferences(): void {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(suffixStorageKey) ?? 'null');
+    if (saved && typeof saved === 'object') {
+      if ('enabled' in saved && typeof saved.enabled === 'boolean') suffixEnabled.checked = saved.enabled;
+      if ('value' in saved && typeof saved.value === 'string') suffixInput.value = saved.value;
+    }
+  } catch {
+    // Missing, malformed, or inaccessible preferences fall back to the defaults.
+  }
+  suffixField.hidden = !suffixEnabled.checked;
+  suffixInput.disabled = !suffixEnabled.checked;
+  validateSuffix();
 }
 
 function invalidateExport(): void {
@@ -396,11 +470,11 @@ function validateDraft(changedKey: BoundKey): void {
 }
 
 function drawSource(): void {
-  if (!loaded) return;
-  composeHorizontalMirror(loaded.element, loaded.size, mirrorMode, editorCanvas);
   mirrorHint.textContent = mirrorMode === 'none'
     ? '选择保留的一侧，将它镜像到另一侧，修复左右不对称。'
     : `保留${mirrorMode === 'left' ? '左' : '右'}半边并镜像到另一半；左右切片线联动，预览和导出同步生效。`;
+  if (!loaded) return;
+  composeHorizontalMirror(loaded.element, loaded.size, mirrorMode, editorCanvas);
 }
 
 async function decodePng(file: File): Promise<LoadedImage> {
@@ -453,9 +527,14 @@ async function loadFile(file: File): Promise<void> {
     const sourceProbeContext = sourceProbe.getContext('2d');
     if (!sourceProbeContext) throw new Error('当前浏览器无法创建 2D 画布。');
     sourceProbeContext.drawImage(next.element, 0, 0);
+    let nextBounds: SliceBounds | null = null;
+    const inheritsBounds = Boolean(loaded && bounds);
     if (next.size.width >= 2 && next.size.height >= 2) {
-      const initialBounds = defaultBounds(next.size);
-      composeNineSlice(next.element, next.size, initialBounds);
+      nextBounds = loaded && bounds
+        ? scaleSliceBounds(loaded.size, next.size, bounds)
+        : defaultBounds(next.size);
+      if (mirrorMode !== 'none') nextBounds = symmetricSliceBounds(next.size, nextBounds, mirrorMode);
+      composeNineSlice(next.element, next.size, nextBounds);
     }
     if (requestId !== loadRequestId) {
       URL.revokeObjectURL(next.objectUrl);
@@ -464,9 +543,8 @@ async function loadFile(file: File): Promise<void> {
 
     const previous = loaded;
     loaded = next;
+    editorViewport.reset();
     previewViewport.reset();
-    mirrorMode = 'none';
-    mirrorSelect.value = mirrorMode;
     sourceTitle.textContent = next.fileName;
     sourceSize.textContent = `${next.size.width} × ${next.size.height} px`;
     exportDetail.textContent = '';
@@ -488,10 +566,15 @@ async function loadFile(file: File): Promise<void> {
       setStatus('图片可以预览，但九宫格裁剪至少需要 2 × 2 像素。', 'error');
     } else {
       for (const guide of Object.values(guides)) guide.hidden = false;
-      bounds = defaultBounds(next.size);
-      resetBounds = { ...bounds };
+      bounds = nextBounds;
+      resetBounds = defaultBounds(next.size);
       render();
-      setStatus(`${next.fileName} 已加载，可以开始调整。`, 'success');
+      const message = inheritsBounds && previous
+        ? previous.size.width === next.size.width && previous.size.height === next.size.height
+          ? '已保留上一张图片的切片参数。'
+          : '已按宽高比例换算上一张图片的切片参数。'
+        : '可以开始调整。';
+      setStatus(`${next.fileName} 已加载，${message}`, 'success');
     }
 
     if (previous) URL.revokeObjectURL(previous.objectUrl);
@@ -520,10 +603,22 @@ function getDraggedValue(event: PointerEvent, key: BoundKey): number {
     : clampInteger(raw, bounds.top, loaded.size.height - 1);
 }
 
+function stopGuideDrag(): void {
+  const previousDrag = drag;
+  drag = null;
+  if (!previousDrag) return;
+  previousDrag.target.classList.remove('active');
+  if (previousDrag.target.hasPointerCapture(previousDrag.pointerId)) {
+    previousDrag.target.releasePointerCapture(previousDrag.pointerId);
+  }
+}
+
+window.addEventListener('blur', stopGuideDrag);
+
 for (const key of Object.keys(guides) as BoundKey[]) {
   const guide = guides[key];
   guide.addEventListener('pointerdown', (event) => {
-    if (!loaded || !bounds || guide.classList.contains('disabled') || drag) return;
+    if (!loaded || !bounds || guide.classList.contains('disabled') || drag || !event.isPrimary || event.button !== 0) return;
     event.preventDefault();
     guide.setPointerCapture(event.pointerId);
     guide.classList.add('active');
@@ -531,21 +626,19 @@ for (const key of Object.keys(guides) as BoundKey[]) {
   });
   guide.addEventListener('pointermove', (event) => {
     if (!drag || drag.pointerId !== event.pointerId || drag.key !== key || !bounds) return;
+    if (event.pointerType === 'mouse' && (event.buttons & 1) === 0) {
+      stopGuideDrag();
+      return;
+    }
     changeBound(key, getDraggedValue(event, key));
   });
   const finishDrag = (event: PointerEvent): void => {
     if (!drag || drag.pointerId !== event.pointerId || drag.key !== key) return;
-    guide.classList.remove('active');
-    if (guide.hasPointerCapture(event.pointerId)) guide.releasePointerCapture(event.pointerId);
-    drag = null;
+    stopGuideDrag();
   };
   guide.addEventListener('pointerup', finishDrag);
   guide.addEventListener('pointercancel', finishDrag);
-  guide.addEventListener('lostpointercapture', (event) => {
-    if (!drag || drag.pointerId !== event.pointerId || drag.key !== key) return;
-    guide.classList.remove('active');
-    drag = null;
-  });
+  guide.addEventListener('lostpointercapture', finishDrag);
   guide.addEventListener('keydown', (event) => {
     if (!loaded || !bounds) return;
     const vertical = key === 'left' || key === 'right';
@@ -562,11 +655,25 @@ for (const key of Object.keys(inputs) as BoundKey[]) {
   inputs[key].addEventListener('input', () => validateDraft(key));
 }
 
-mirrorSelect.addEventListener('change', () => {
-  if (!loaded || !bounds) return;
-  mirrorMode = mirrorSelect.value as MirrorMode;
-  if (mirrorMode !== 'none') bounds = symmetricSliceBounds(loaded.size, bounds, mirrorMode);
+mirrorDetailsButton.addEventListener('click', () => {
+  mirrorDetails.hidden = !mirrorDetails.hidden;
+  mirrorDetailsButton.setAttribute('aria-expanded', String(!mirrorDetails.hidden));
+  mirrorDetailsButton.textContent = mirrorDetails.hidden ? '详细信息' : '收起信息';
+});
+
+for (const option of mirrorOptions) option.addEventListener('change', () => {
+  if (!option.checked) return;
+  mirrorMode = option.value as MirrorMode;
+  if (loaded && bounds && mirrorMode !== 'none') bounds = symmetricSliceBounds(loaded.size, bounds, mirrorMode);
   drawSource();
+  if (!loaded) {
+    setStatus('镜像模式已选择，上传图片后自动应用。');
+    return;
+  }
+  if (!bounds) {
+    setStatus('镜像模式已应用；图片至少需要 2 × 2 像素才能进行九宫格裁剪。');
+    return;
+  }
   render();
   setStatus(mirrorMode === 'none'
     ? '已恢复原图像素。'
@@ -574,6 +681,7 @@ mirrorSelect.addEventListener('change', () => {
 });
 
 suffixInput.addEventListener('input', () => {
+  saveSuffixPreferences();
   // Let users finish typing before validating; blur and export are the checkpoints.
   suffixIsValid = true;
   suffixError.textContent = '';
@@ -584,6 +692,7 @@ suffixInput.addEventListener('input', () => {
 });
 suffixInput.addEventListener('blur', validateSuffix);
 suffixEnabled.addEventListener('change', () => {
+  saveSuffixPreferences();
   invalidateExport();
   suffixField.hidden = !suffixEnabled.checked;
   suffixInput.disabled = !suffixEnabled.checked;
@@ -625,17 +734,16 @@ window.addEventListener('dragover', (event) => event.preventDefault());
 window.addEventListener('drop', (event) => event.preventDefault());
 
 resetButton.addEventListener('click', () => {
+  editorViewport.reset();
+  previewViewport.reset();
   if (!resetBounds) {
     setStatus('这张图片太小，无法进行九宫格裁剪。', 'error');
     return;
   }
   bounds = { ...resetBounds };
-  previewViewport.reset();
   mirrorMode = 'none';
-  mirrorSelect.value = mirrorMode;
+  for (const option of mirrorOptions) option.checked = option.value === mirrorMode;
   drawSource();
-  if (drag) drag.target.classList.remove('active');
-  drag = null;
   render();
   setStatus('切片边界和镜像设置已重置。', 'success');
 });
@@ -759,3 +867,5 @@ window.addEventListener('beforeunload', () => {
   exportAbortController?.abort();
   if (loaded) URL.revokeObjectURL(loaded.objectUrl);
 });
+
+restoreSuffixPreferences();
